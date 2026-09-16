@@ -1,0 +1,119 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { createServerSupabase, getSessionUserId, supabaseAdmin } from '@/backend/lib/supabase/server';
+import { razorpay, PLANS } from '@/backend/lib/razorpay';
+
+export async function POST(req: NextRequest) {
+  try {
+    const userId = await getSessionUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const { planId } = await req.json();
+    if (!planId || (planId !== 'pro' && planId !== 'founder')) {
+      return NextResponse.json({ error: 'Invalid plan' }, { status: 400 });
+    }
+
+    const sb = await createServerSupabase();
+    const { data: { user: authUser } } = await sb.auth.getUser();
+    if (!authUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    let { data: user } = await sb.from('users').select('*').eq('id', userId).maybeSingle();
+    
+    if (!user) {
+      // Auto-sync/recreate the user from Supabase Auth in case the database trigger was skipped
+      const name = authUser.user_metadata?.full_name || authUser.user_metadata?.name || authUser.email?.split('@')[0] || '';
+      const { data: newUser, error: insertError } = await supabaseAdmin
+        .from('users')
+        .upsert({
+          id: userId,
+          email: authUser.email,
+          name: name,
+          plan: 'free',
+          updated_at: new Date().toISOString(),
+        })
+        .select()
+        .single();
+      if (insertError) {
+        console.error('Auto-creation of user failed in create-subscription:', insertError);
+        return NextResponse.json({ error: 'User not found' }, { status: 404 });
+      }
+      user = newUser;
+    }
+
+    const currentPlan = String(user.plan ?? 'free');
+    if (currentPlan === 'founder') {
+      return NextResponse.json(
+        { error: 'You are already on Founder plan. No further upgrade available.' },
+        { status: 400 }
+      );
+    }
+    if (currentPlan === 'pro' && planId === 'pro') {
+      return NextResponse.json(
+        { error: 'You are already on Pro plan. Upgrade to Founder instead.' },
+        { status: 400 }
+      );
+    }
+
+    let customerId = user.razorpay_customer_id;
+    
+    // Auto-heal check: If customer ID exists, verify it belongs to the current Razorpay account (Test vs Live)
+    if (customerId) {
+      try {
+        await razorpay.customers.fetch(customerId);
+      } catch (err) {
+        console.warn(`Stored customer ID ${customerId} not found in current Razorpay account. Recreating...`);
+        customerId = null;
+      }
+    }
+
+    if (!customerId) {
+      const customer = await razorpay.customers.create({
+        email: user.email,
+        name: user.name || '',
+      });
+      customerId = customer.id;
+      // Save the new customer ID in the profile using supabaseAdmin to bypass RLS
+      await supabaseAdmin.from('users').update({ razorpay_customer_id: customerId }).eq('id', userId);
+    }
+
+    type CreateSubscriptionInput = Parameters<typeof razorpay.subscriptions.create>[0];
+    const input = {
+      plan_id: PLANS[planId as keyof typeof PLANS].id,
+      customer_id: customerId,
+      total_count: 120, // 10 years
+      customer_notify: 1,
+      notes: { ideaforge_plan: planId },
+    } as unknown as CreateSubscriptionInput;
+
+    const subscription = await razorpay.subscriptions.create(input);
+
+    const subscriptionId = (subscription as unknown as { id?: string }).id;
+    if (!subscriptionId) {
+      return NextResponse.json({ error: 'Failed to create subscription' }, { status: 500 });
+    }
+
+    const prefill = {
+      name: authUser.user_metadata?.full_name || authUser.user_metadata?.name || user.name || '',
+      email: authUser.email || user.email || '',
+      phone: authUser.user_metadata?.phone || '',
+    };
+
+    return NextResponse.json({ subscriptionId, prefill });
+  } catch (err: unknown) {
+    console.error('Subscription error:', err);
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    return NextResponse.json({ 
+      error: message, 
+      stack: err instanceof Error ? err.stack : undefined,
+      env: {
+        hasUrl: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+        hasAnon: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+        hasService: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+        hasRazorpayId: !!process.env.RAZORPAY_KEY_ID,
+        hasRazorpaySecret: !!process.env.RAZORPAY_KEY_SECRET,
+        hasPlanPro: !!process.env.NEXT_PUBLIC_RAZORPAY_PLAN_PRO,
+        hasPlanFounder: !!process.env.NEXT_PUBLIC_RAZORPAY_PLAN_FOUNDER,
+        planProVal: process.env.NEXT_PUBLIC_RAZORPAY_PLAN_PRO ? process.env.NEXT_PUBLIC_RAZORPAY_PLAN_PRO.substring(0, 8) + '...' : 'none',
+      }
+    }, { status: 500 });
+  }
+}

@@ -1,0 +1,37 @@
+version: 1
+applications:
+  - appRoot: frontend
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            # Go to repository root, run npm ci for monorepo workspaces, then return to frontend
+            - cd .. && npm ci && cd frontend
+        build:
+          commands:
+            # Inject environment variables to .env.production so they are available to Next.js SSR functions at runtime
+            - echo "NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL" >> .env.production
+            - echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY" >> .env.production
+            - echo "SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY" >> .env.production
+            - echo "OPENROUTER_API_KEY=$OPENROUTER_API_KEY" >> .env.production
+            - echo "OPENROUTER_FLASH_MODEL=$OPENROUTER_FLASH_MODEL" >> .env.production
+            - echo "OPENROUTER_PRO_MODEL=$OPENROUTER_PRO_MODEL" >> .env.production
+            - echo "NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL" >> .env.production
+            - echo "RAZORPAY_KEY_ID=$RAZORPAY_KEY_ID" >> .env.production
+            - echo "RAZORPAY_KEY_SECRET=$RAZORPAY_KEY_SECRET" >> .env.production
+            - echo "NEXT_PUBLIC_RAZORPAY_KEY_ID=$NEXT_PUBLIC_RAZORPAY_KEY_ID" >> .env.production
+            - echo "NEXT_PUBLIC_RAZORPAY_PLAN_PRO=$NEXT_PUBLIC_RAZORPAY_PLAN_PRO" >> .env.production
+            - echo "NEXT_PUBLIC_RAZORPAY_PLAN_FOUNDER=$NEXT_PUBLIC_RAZORPAY_PLAN_FOUNDER" >> .env.production
+            - npx next build
+      artifacts:
+        baseDirectory: .next
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
+          - ../node_modules/**/*
+          - .next/cache/**/*
+      framework:
+        config:
+          functionTimeout: 300
