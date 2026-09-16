@@ -5,7 +5,7 @@ applications:
       phases:
         preBuild:
           commands:
-            # Go to repository root, run npm ci for monorepo workspaces, then return to frontend
+            - nvm use 20 || nvm install 20
             - cd .. && npm ci && cd frontend
         build:
           commands:
